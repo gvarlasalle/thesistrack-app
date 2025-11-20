@@ -7,6 +7,7 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      # Firebase
       - key: VITE_FIREBASE_API_KEY
         sync: false
       - key: VITE_FIREBASE_AUTH_DOMAIN
@@ -18,4 +19,9 @@ services:
       - key: VITE_FIREBASE_MESSAGING_SENDER_ID
         sync: false
       - key: VITE_FIREBASE_APP_ID
+        sync: false
+      # Supabase
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
         sync: false
