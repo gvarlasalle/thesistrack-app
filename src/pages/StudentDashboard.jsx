@@ -2,36 +2,112 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { logout } from '../services/authService';
 import { useNavigate } from 'react-router-dom';
-import { getProjectByStudent } from '../services/projectService';
-import { getDeliveriesByProject } from '../services/deliveryService';
+import { getProjectsByStudent } from '../services/projectService';
+import { 
+  getDeliveriesByProject, 
+  getCurrentMilestoneStatus,
+  getNextAvailableMilestone
+} from '../services/deliveryService';
 import { UploadDeliveryForm } from '../components/student/UploadDeliveryForm';
 
 export const StudentDashboard = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
-  const [project, setProject] = useState(null);
+  const [projects, setProjects] = useState([]);
+  const [selectedProject, setSelectedProject] = useState(null);
   const [deliveries, setDeliveries] = useState([]);
+  const [milestones, setMilestones] = useState([]);
+  const [milestoneStatus, setMilestoneStatus] = useState({});
   const [loading, setLoading] = useState(true);
-  const [showUploadForm, setShowUploadForm] = useState(false);
-  const [selectedMilestone, setSelectedMilestone] = useState('');
-  const [expandedDeliveries, setExpandedDeliveries] = useState({});
+  const [uploadingMilestone, setUploadingMilestone] = useState(null);
+  const [expandedMilestone, setExpandedMilestone] = useState(null);
 
   useEffect(() => {
-    loadData();
+    if (user) {
+      loadProjects();
+    }
   }, [user]);
 
-  const loadData = async () => {
-    if (!user?.uid) return;
+  useEffect(() => {
+    if (selectedProject) {
+      loadProjectData();
+    }
+  }, [selectedProject]);
+  
+const loadProjects = async () => {
     try {
-      const projectData = await getProjectByStudent(user.uid);
-      if (projectData) {
-        setProject(projectData);
-        const deliveriesData = await getDeliveriesByProject(projectData.id);
-        deliveriesData.sort((a, b) => (b.version || 0) - (a.version || 0));
-        setDeliveries(deliveriesData);
+      setLoading(true);
+      const userProjects = await getProjectsByStudent(user.uid);
+      
+      // Cargar nombres de asesores
+      const projectsWithAdvisors = await Promise.all(
+        userProjects.map(async (project) => {
+          if (project.advisorId) {
+            try {
+              const { getUserById } = await import('../services/userService');
+              const advisor = await getUserById(project.advisorId);
+              return {
+                ...project,
+                advisorName: advisor.name || 'Por asignar'
+              };
+            } catch (err) {
+              console.warn('Error obteniendo asesor:', err);
+              return {
+                ...project,
+                advisorName: 'Por asignar'
+              };
+            }
+          }
+          return {
+            ...project,
+            advisorName: 'Por asignar'
+          };
+        })
+      );
+      
+      setProjects(projectsWithAdvisors);
+      
+      if (projectsWithAdvisors.length > 0) {
+        setSelectedProject(projectsWithAdvisors[0]);
+        setMilestones(projectsWithAdvisors[0].milestones || []);
       }
     } catch (error) {
-      console.error('Error:', error);
+      console.error('Error cargando proyectos:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+const loadProjectData = async () => {
+    try {
+      setLoading(true);
+      
+      const projectDeliveries = await getDeliveriesByProject(selectedProject.id);
+      setDeliveries(projectDeliveries);
+      
+      const projectMilestones = selectedProject.milestones || [];
+      setMilestones(projectMilestones);
+      
+      const milestonesNames = projectMilestones.map(m => m.name);
+      const status = await getCurrentMilestoneStatus(selectedProject.id, milestonesNames);
+      
+      // Importar la función
+      const { getNextAvailableMilestone } = await import('../services/deliveryService');
+      const nextMilestone = await getNextAvailableMilestone(selectedProject.id, projectMilestones);
+      
+      // Actualizar el estado para permitir subida solo en el hito disponible
+      const updatedStatus = {};
+      for (const [milestoneName, milestoneData] of Object.entries(status)) {
+        updatedStatus[milestoneName] = {
+          ...milestoneData,
+          canUpload: milestoneName === nextMilestone
+        };
+      }
+      
+      setMilestoneStatus(updatedStatus);
+      
+    } catch (error) {
+      console.error('Error cargando datos del proyecto:', error);
     } finally {
       setLoading(false);
     }
@@ -42,77 +118,93 @@ export const StudentDashboard = () => {
       await logout();
       navigate('/login');
     } catch (error) {
-      console.error('Error:', error);
+      console.error('Error al cerrar sesión:', error);
     }
   };
 
-  const handleUploadClick = (milestone) => {
-    setSelectedMilestone(milestone);
-    setShowUploadForm(true);
+  const handleUploadClick = (milestoneName) => {
+    setUploadingMilestone(milestoneName);
   };
 
   const handleUploadSuccess = () => {
-    setShowUploadForm(false);
-    setSelectedMilestone('');
-    loadData();
+    setUploadingMilestone(null);
+    loadProjectData();
   };
 
-  const toggleDeliveryExpand = (deliveryId) => {
-    setExpandedDeliveries(prev => ({
-      ...prev,
-      [deliveryId]: !prev[deliveryId]
-    }));
+  const handleUploadCancel = () => {
+    setUploadingMilestone(null);
+  };
+
+  const toggleMilestoneExpand = (milestoneName) => {
+    setExpandedMilestone(expandedMilestone === milestoneName ? null : milestoneName);
   };
 
   const getStatusBadge = (status) => {
-    const config = {
-      pending: { bg: '#fef3c7', color: '#92400e', label: 'Pendiente', icon: '⏳' },
-      approved: { bg: '#d1fae5', color: '#065f46', label: 'Aprobado', icon: '✓' },
-      rejected: { bg: '#fee2e2', color: '#991b1b', label: 'Rechazado', icon: '✗' }
+    const badges = {
+      'not_started': {
+        bg: '#f3f4f6',
+        color: '#4b5563',
+        text: 'Sin Iniciar'
+      },
+      'pending': {
+        bg: '#fef3c7',
+        color: '#92400e',
+        text: 'Pendiente'
+      },
+      'approved': {
+        bg: '#d1fae5',
+        color: '#065f46',
+        text: 'Aprobado'
+      },
+      'rejected': {
+        bg: '#fee2e2',
+        color: '#991b1b',
+        text: 'Rechazado'
+      }
     };
-    const style = config[status] || config.pending;
-    
+
+    const badge = badges[status] || badges['not_started'];
+
     return (
       <span style={{
-        padding: '6px 14px',
+        padding: '6px 12px',
         borderRadius: '20px',
-        fontSize: '13px',
+        fontSize: '12px',
         fontWeight: '600',
-        background: style.bg,
-        color: style.color,
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: '4px'
+        background: badge.bg,
+        color: badge.color
       }}>
-        <span>{style.icon}</span>
-        {style.label}
+        {badge.text}
       </span>
     );
   };
 
   const formatDate = (timestamp) => {
     if (!timestamp) return 'N/A';
-    try {
-      return timestamp.toDate().toLocaleString('es-PE');
-    } catch (e) {
-      return 'Fecha invalida';
-    }
+    const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+    return date.toLocaleDateString('es-ES', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
   };
 
   const formatFileSize = (bytes) => {
     if (!bytes) return 'N/A';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
   };
-
-  const getDeliveriesByMilestone = (milestone) => deliveries.filter(d => d.milestone === milestone);
 
   if (loading) {
     return (
       <div style={{
         minHeight: '100vh',
-        background: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
+        background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center'
@@ -128,18 +220,18 @@ export const StudentDashboard = () => {
             width: '50px',
             height: '50px',
             border: '4px solid #f3f4f6',
-            borderTop: '4px solid #43e97b',
+            borderTop: '4px solid #10b981',
             borderRadius: '50%',
             margin: '0 auto 20px',
             animation: 'spin 1s linear infinite'
           }}></div>
-          <p style={{color: '#6b7280', fontSize: '16px'}}>Cargando tu proyecto...</p>
+          <p style={{color: '#6b7280', fontSize: '16px'}}>Cargando dashboard...</p>
         </div>
       </div>
     );
   }
 
-  if (!project) {
+  if (projects.length === 0) {
     return (
       <div style={{minHeight: '100vh', background: '#f3f4f6'}}>
         <header style={{
@@ -162,20 +254,21 @@ export const StudentDashboard = () => {
                 width: '48px',
                 height: '48px',
                 borderRadius: '12px',
-                background: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                boxShadow: '0 4px 15px rgba(67, 233, 123, 0.4)'
+                boxShadow: '0 4px 15px rgba(16, 185, 129, 0.4)'
               }}>
-                <svg style={{width: '28px', height: '28px', color: 'white'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 14l9-5-9-5-9 5 9 5z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z" />
-                </svg>
+                <span style={{fontSize: '24px'}}>📚</span>
               </div>
               <div>
-                <h1 style={{fontSize: '24px', fontWeight: 'bold', color: '#1f2937', margin: 0}}>Mi Proyecto</h1>
-                <p style={{fontSize: '14px', color: '#6b7280', margin: '4px 0 0 0'}}>Bienvenido, {user?.name}</p>
+                <h1 style={{fontSize: '24px', fontWeight: 'bold', color: '#1f2937', margin: 0}}>
+                  Panel de Estudiante
+                </h1>
+                <p style={{fontSize: '14px', color: '#6b7280', margin: '4px 0 0 0'}}>
+                  Bienvenido, {user?.name}
+                </p>
               </div>
             </div>
             <button
@@ -195,43 +288,35 @@ export const StudentDashboard = () => {
               onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
               onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
             >
-              Cerrar Sesion
+              Cerrar Sesión
             </button>
           </div>
         </header>
 
-        <main style={{maxWidth: '1400px', margin: '0 auto', padding: '32px'}}>
+        <div style={{padding: '32px', maxWidth: '1000px', margin: '0 auto'}}>
           <div style={{
-            background: 'white',
+            background: '#fef3c7',
+            border: '2px solid #fcd34d',
             borderRadius: '16px',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-            padding: '60px 32px',
+            padding: '32px',
             textAlign: 'center'
           }}>
-            <svg style={{width: '80px', height: '80px', margin: '0 auto 20px', color: '#d1d5db'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            <h3 style={{fontSize: '20px', color: '#1f2937', fontWeight: '600', marginBottom: '8px'}}>
-              No tienes proyecto asignado
-            </h3>
-            <p style={{fontSize: '14px', color: '#6b7280'}}>
-              Un administrador te asignara a un proyecto pronto
+            <div style={{fontSize: '64px', marginBottom: '16px'}}>⚠️</div>
+            <h2 style={{fontSize: '24px', fontWeight: 'bold', color: '#1f2937', marginBottom: '12px'}}>
+              No tienes proyectos asignados
+            </h2>
+            <p style={{fontSize: '16px', color: '#6b7280'}}>
+              Contacta con tu asesor para que te asigne a un proyecto.
             </p>
           </div>
-        </main>
+        </div>
       </div>
     );
   }
 
-  const milestones = ['Capitulo 1', 'Capitulo 2', 'Capitulo 3'];
-  const projectStatusStyle = {
-    pending: { bg: '#fef3c7', color: '#92400e', label: 'Pendiente' },
-    in_progress: { bg: '#dbeafe', color: '#1e40af', label: 'En Progreso' },
-    completed: { bg: '#d1fae5', color: '#065f46', label: 'Completado' }
-  }[project.status] || { bg: '#f3f4f6', color: '#6b7280', label: 'Desconocido' };
-
   return (
     <div style={{minHeight: '100vh', background: '#f3f4f6'}}>
+      {/* Header */}
       <header style={{
         background: 'white',
         boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
@@ -252,20 +337,21 @@ export const StudentDashboard = () => {
               width: '48px',
               height: '48px',
               borderRadius: '12px',
-              background: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
+              background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              boxShadow: '0 4px 15px rgba(67, 233, 123, 0.4)'
+              boxShadow: '0 4px 15px rgba(16, 185, 129, 0.4)'
             }}>
-              <svg style={{width: '28px', height: '28px', color: 'white'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 14l9-5-9-5-9 5 9 5z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z" />
-              </svg>
+              <span style={{fontSize: '24px'}}>📚</span>
             </div>
             <div>
-              <h1 style={{fontSize: '24px', fontWeight: 'bold', color: '#1f2937', margin: 0}}>Mi Proyecto</h1>
-              <p style={{fontSize: '14px', color: '#6b7280', margin: '4px 0 0 0'}}>Bienvenido, {user?.name}</p>
+              <h1 style={{fontSize: '24px', fontWeight: 'bold', color: '#1f2937', margin: 0}}>
+                Panel de Estudiante
+              </h1>
+              <p style={{fontSize: '14px', color: '#6b7280', margin: '4px 0 0 0'}}>
+                Bienvenido, {user?.name}
+              </p>
             </div>
           </div>
           <button
@@ -285,297 +371,372 @@ export const StudentDashboard = () => {
             onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
             onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
           >
-            Cerrar Sesion
+            Cerrar Sesión
           </button>
         </div>
       </header>
 
+      {/* Content */}
       <main style={{maxWidth: '1400px', margin: '0 auto', padding: '32px'}}>
-        <div style={{
-          background: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
-          borderRadius: '20px',
-          padding: '32px',
-          marginBottom: '32px',
-          boxShadow: '0 10px 40px rgba(67, 233, 123, 0.3)',
-          color: 'white',
-          position: 'relative',
-          overflow: 'hidden'
-        }}>
-          <div style={{position: 'absolute', top: '-40px', right: '-40px', opacity: 0.1}}>
-            <svg style={{width: '200px', height: '200px'}} fill="currentColor" viewBox="0 0 24 24">
-              <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-          </div>
-          
-          <div style={{position: 'relative', zIndex: 1}}>
-            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '16px'}}>
-              <div>
-                <p style={{fontSize: '14px', opacity: 0.9, margin: '0 0 8px 0'}}>TU PROYECTO</p>
-                <h2 style={{fontSize: '32px', fontWeight: 'bold', margin: 0}}>{project.title}</h2>
+        {/* Información del Proyecto */}
+        {selectedProject && (
+          <div style={{marginBottom: '32px'}}>
+            <div style={{
+              background: 'white',
+              borderRadius: '16px',
+              padding: '24px',
+              boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
+              borderLeft: '6px solid #10b981'
+            }}>
+              <div style={{marginBottom: '12px'}}>
+                <h2 style={{fontSize: '24px', fontWeight: 'bold', color: '#1f2937', margin: '0 0 8px 0'}}>
+                  {selectedProject.title}
+                </h2>
+                <p style={{fontSize: '16px', color: '#6b7280', margin: 0}}>
+                  {selectedProject.description}
+                </p>
               </div>
-              <span style={{
-                padding: '8px 16px',
-                background: 'rgba(255, 255, 255, 0.2)',
-                backdropFilter: 'blur(10px)',
-                borderRadius: '20px',
-                fontSize: '14px',
-                fontWeight: '600'
-              }}>
-                {projectStatusStyle.label}
-              </span>
-            </div>
-            <p style={{fontSize: '16px', opacity: 0.95, lineHeight: '1.6', marginBottom: '20px'}}>
-              {project.description}
-            </p>
-            <div style={{display: 'flex', gap: '24px', fontSize: '14px', opacity: 0.9}}>
-              <span>📋 Hito Actual: {project.currentMilestone}</span>
-              <span>✓ {deliveries.length} entregas realizadas</span>
+              <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '16px'}}>
+                <div>
+                  <span style={{fontSize: '14px', color: '#6b7280', fontWeight: '500'}}>Asesor:</span>
+                  <p style={{fontSize: '16px', color: '#1f2937', fontWeight: '600', margin: '4px 0 0 0'}}>
+                    {selectedProject.advisorName || 'Por asignar'}
+                  </p>
+                </div>
+                <div>
+                  <span style={{fontSize: '14px', color: '#6b7280', fontWeight: '500'}}>Fecha de inicio:</span>
+                  <p style={{fontSize: '16px', color: '#1f2937', fontWeight: '600', margin: '4px 0 0 0'}}>
+                    {formatDate(selectedProject.createdAt)}
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
-        <div style={{
-          background: 'white',
-          borderRadius: '16px',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-          padding: '28px',
-          marginBottom: '32px'
-        }}>
-          <h2 style={{fontSize: '22px', fontWeight: 'bold', marginBottom: '24px', color: '#1f2937'}}>
-            Hitos del Proyecto
-          </h2>
+        {/* Hitos del Proyecto */}
+        <div>
+          <div style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: '24px',
+            paddingBottom: '12px',
+            borderBottom: '3px solid #10b981'
+          }}>
+            <h2 style={{fontSize: '20px', fontWeight: 'bold', color: '#1f2937', margin: 0}}>
+              📋 Hitos del Proyecto
+            </h2>
+            <span style={{
+              fontSize: '14px',
+              color: '#6b7280',
+              fontWeight: '500',
+              background: '#f3f4f6',
+              padding: '8px 16px',
+              borderRadius: '20px'
+            }}>
+              {Object.values(milestoneStatus).filter(m => m.status === 'approved').length} de {milestones.length} completados
+            </span>
+          </div>
 
-          <div style={{display: 'grid', gap: '16px'}}>
-            {milestones.map((milestone) => {
-              const milestoneDeliveries = getDeliveriesByMilestone(milestone);
-              const isCurrentMilestone = project.currentMilestone === milestone;
-              const hasApproved = milestoneDeliveries.some(d => d.status === 'approved');
-              
+          <div style={{display: 'flex', flexDirection: 'column', gap: '16px'}}>
+            {milestones.map((milestone, index) => {
+              const milestoneName = milestone.name;
+              const status = milestoneStatus[milestoneName] || { status: 'not_started', canUpload: false, deliveries: [] };
+              const isExpanded = expandedMilestone === milestoneName;
+              const hasDeliveries = status.deliveries && status.deliveries.length > 0;
+
               return (
-                <div
-                  key={milestone}
-                  style={{
-                    background: isCurrentMilestone ? 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)' : '#f9fafb',
-                    border: `2px solid ${isCurrentMilestone ? '#60a5fa' : '#e5e7eb'}`,
-                    borderRadius: '12px',
-                    padding: '20px',
-                    transition: 'all 0.3s'
-                  }}
-                >
-                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px'}}>
-                    <div style={{display: 'flex', alignItems: 'center', gap: '12px'}}>
-                      <div style={{
-                        width: '40px',
-                        height: '40px',
-                        borderRadius: '10px',
-                        background: hasApproved 
-                          ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)' 
-                          : isCurrentMilestone 
-                          ? 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)'
-                          : 'linear-gradient(135deg, #9ca3af 0%, #6b7280 100%)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        boxShadow: '0 4px 12px rgba(0,0,0,0.1)'
-                      }}>
-                        {hasApproved ? (
-                          <svg style={{width: '24px', height: '24px', color: 'white'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                          </svg>
-                        ) : (
-                          <svg style={{width: '24px', height: '24px', color: 'white'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                          </svg>
+                <div key={milestoneName} style={{
+                  background: 'white',
+                  borderRadius: '12px',
+                  overflow: 'hidden',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+                  border: '2px solid #e5e7eb'
+                }}>
+                  {/* Header del Hito */}
+                  <div style={{
+                    background: 'linear-gradient(to right, #f9fafb, white)',
+                    padding: '20px'
+                  }}>
+                    <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                      <div style={{display: 'flex', alignItems: 'center', gap: '16px', flex: 1}}>
+                        <div style={{
+                          width: '48px',
+                          height: '48px',
+                          background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                          color: 'white',
+                          borderRadius: '12px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontWeight: 'bold',
+                          fontSize: '20px',
+                          flexShrink: 0,
+                          boxShadow: '0 4px 15px rgba(16, 185, 129, 0.3)'
+                        }}>
+                          {index + 1}
+                        </div>
+                        <div style={{flex: 1}}>
+                          <h3 style={{fontSize: '18px', fontWeight: 'bold', color: '#1f2937', margin: 0}}>
+                            {milestoneName}
+                          </h3>
+                          {status.message && (
+                            <p style={{fontSize: '14px', color: '#6b7280', margin: '4px 0 0 0'}}>
+                              {status.message}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      
+                      <div style={{display: 'flex', alignItems: 'center', gap: '12px'}}>
+                        {getStatusBadge(status.status)}
+                        
+                        {status.canUpload && uploadingMilestone !== milestoneName && (
+                          <button
+                            onClick={() => handleUploadClick(milestoneName)}
+                            style={{
+                              padding: '10px 20px',
+                              background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '10px',
+                              fontSize: '14px',
+                              fontWeight: '600',
+                              cursor: 'pointer',
+                              boxShadow: '0 4px 15px rgba(16, 185, 129, 0.4)',
+                              transition: 'transform 0.2s',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px'
+                            }}
+                            onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
+                            onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
+                          >
+                            <svg style={{width: '18px', height: '18px'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                            </svg>
+                            Subir Entrega
+                          </button>
+                        )}
+
+                        {hasDeliveries && (
+                          <button
+                            onClick={() => toggleMilestoneExpand(milestoneName)}
+                            style={{
+                              padding: '8px',
+                              background: 'transparent',
+                              border: 'none',
+                              color: '#6b7280',
+                              cursor: 'pointer',
+                              borderRadius: '8px',
+                              transition: 'background 0.2s'
+                            }}
+                            onMouseOver={(e) => e.target.style.background = '#f3f4f6'}
+                            onMouseOut={(e) => e.target.style.background = 'transparent'}
+                          >
+                            <svg 
+                              style={{
+                                width: '24px',
+                                height: '24px',
+                                transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+                                transition: 'transform 0.3s'
+                              }}
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                            </svg>
+                          </button>
                         )}
                       </div>
-                      <div>
-                        <h3 style={{fontSize: '18px', fontWeight: '600', color: '#1f2937', margin: 0}}>
-                          {milestone}
-                        </h3>
-                        <p style={{fontSize: '13px', color: '#6b7280', margin: '2px 0 0 0'}}>
-                          {milestoneDeliveries.length} entrega(s) • {hasApproved ? 'Aprobado ✓' : isCurrentMilestone ? 'Hito Actual' : 'Pendiente'}
-                        </p>
-                      </div>
                     </div>
-
-                    <button
-                      onClick={() => handleUploadClick(milestone)}
-                      style={{
-                        padding: '10px 20px',
-                        background: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '10px',
-                        fontSize: '14px',
-                        fontWeight: '600',
-                        cursor: 'pointer',
-                        boxShadow: '0 4px 12px rgba(67, 233, 123, 0.3)',
-                        transition: 'transform 0.2s',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px'
-                      }}
-                      onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
-                      onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
-                    >
-                      <svg style={{width: '18px', height: '18px'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                      </svg>
-                      Subir
-                    </button>
                   </div>
 
-                  {milestoneDeliveries.length > 0 && (
+                  {/* Formulario de Subida */}
+                  {uploadingMilestone === milestoneName && (
                     <div style={{
-                      background: 'white',
-                      borderRadius: '10px',
-                      padding: '16px',
-                      marginTop: '12px'
+                      padding: '20px',
+                      background: '#eff6ff',
+                      borderTop: '2px solid #bfdbfe'
                     }}>
-                      <p style={{fontSize: '12px', fontWeight: '600', color: '#6b7280', marginBottom: '12px', textTransform: 'uppercase'}}>
-                        Entregas Realizadas
-                      </p>
-                      <div style={{display: 'grid', gap: '8px'}}>
-                        {milestoneDeliveries.map((delivery) => (
-                          <div key={delivery.id} style={{
-                            border: '1px solid #e5e7eb',
-                            borderRadius: '8px',
-                            overflow: 'hidden'
-                          }}>
-                            <div 
-                              onClick={() => toggleDeliveryExpand(delivery.id)}
-                              style={{
-                                display: 'flex',
-                                justifyContent: 'space-between',
-                                alignItems: 'center',
-                                padding: '12px',
-                                background: '#f9fafb',
-                                cursor: 'pointer',
-                                transition: 'background 0.2s'
-                              }}
-                              onMouseOver={(e) => e.currentTarget.style.background = '#f3f4f6'}
-                              onMouseOut={(e) => e.currentTarget.style.background = '#f9fafb'}
-                            >
-                              <div style={{flex: 1, display: 'flex', alignItems: 'center', gap: '12px'}}>
-                                <span style={{fontSize: '14px', color: '#6b7280'}}>
-                                  {expandedDeliveries[delivery.id] ? '▼' : '▶'}
-                                </span>
-                                <div>
-                                  <p style={{fontSize: '14px', fontWeight: '500', color: '#1f2937', margin: 0}}>
-                                    {delivery.milestone}
-                                  </p>
-                                  <p style={{fontSize: '12px', color: '#6b7280', margin: '2px 0 0 0'}}>
-                                    Version {delivery.version} • {delivery.fileName}
-                                  </p>
-                                </div>
-                              </div>
-                              <div>
-                                {getStatusBadge(delivery.status)}
-                              </div>
-                            </div>
+                      <UploadDeliveryForm
+                        projectId={selectedProject.id}
+                        milestone={milestoneName}
+                        onSuccess={handleUploadSuccess}
+                        onCancel={handleUploadCancel}
+                      />
+                    </div>
+                  )}
 
-                            {expandedDeliveries[delivery.id] && (
-                              <div style={{
-                                padding: '16px',
-                                background: 'white',
-                                borderTop: '1px solid #e5e7eb'
-                              }}>
+                  {/* Lista de Entregas Expandible */}
+                  {isExpanded && hasDeliveries && (
+                    <div style={{
+                      padding: '20px',
+                      background: '#f9fafb',
+                      borderTop: '1px solid #e5e7eb'
+                    }}>
+                      <h4 style={{
+                        fontSize: '14px',
+                        fontWeight: 'bold',
+                        color: '#374151',
+                        marginBottom: '16px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px'
+                      }}>
+                        <span>📄</span>
+                        Historial de Versiones ({status.deliveries.length})
+                      </h4>
+                      <div style={{display: 'flex', flexDirection: 'column', gap: '12px'}}>
+                        {status.deliveries.map((delivery) => (
+                          <div 
+                            key={delivery.id}
+                            style={{
+                              background: 'white',
+                              borderRadius: '8px',
+                              padding: '16px',
+                              border: '2px solid #e5e7eb'
+                            }}
+                          >
+                            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'start'}}>
+                              <div style={{flex: 1}}>
+                                <div style={{display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px'}}>
+                                  <span style={{
+                                    fontSize: '12px',
+                                    fontWeight: 'bold',
+                                    color: '#2563eb',
+                                    background: '#dbeafe',
+                                    padding: '4px 12px',
+                                    borderRadius: '12px'
+                                  }}>
+                                    Versión {delivery.version}
+                                  </span>
+                                  {getStatusBadge(delivery.status)}
+                                </div>
+                                
                                 <div style={{
                                   display: 'grid',
-                                  gridTemplateColumns: 'repeat(2, 1fr)',
-                                  gap: '16px',
-                                  marginBottom: '16px'
+                                  gridTemplateColumns: '1fr 1fr',
+                                  gap: '12px',
+                                  fontSize: '14px'
                                 }}>
                                   <div>
-                                    <p style={{fontSize: '12px', color: '#6b7280', marginBottom: '4px'}}>Archivo</p>
-                                    <p style={{fontSize: '14px', fontWeight: '500', color: '#1f2937', margin: 0}}>
+                                    <span style={{color: '#6b7280'}}>Archivo:</span>
+                                    <p style={{color: '#1f2937', fontWeight: '600', margin: '2px 0 0 0'}}>
                                       {delivery.fileName}
                                     </p>
                                   </div>
                                   <div>
-                                    <p style={{fontSize: '12px', color: '#6b7280', marginBottom: '4px'}}>Tamaño</p>
-                                    <p style={{fontSize: '14px', fontWeight: '500', color: '#1f2937', margin: 0}}>
+                                    <span style={{color: '#6b7280'}}>Tamaño:</span>
+                                    <p style={{color: '#1f2937', margin: '2px 0 0 0'}}>
                                       {formatFileSize(delivery.fileSize)}
                                     </p>
                                   </div>
                                   <div>
-                                    <p style={{fontSize: '12px', color: '#6b7280', marginBottom: '4px'}}>Fecha de Subida</p>
-                                    <p style={{fontSize: '14px', fontWeight: '500', color: '#1f2937', margin: 0}}>
+                                    <span style={{color: '#6b7280'}}>Subido:</span>
+                                    <p style={{color: '#1f2937', margin: '2px 0 0 0'}}>
                                       {formatDate(delivery.uploadedAt)}
                                     </p>
                                   </div>
-                                  <div>
-                                    <p style={{fontSize: '12px', color: '#6b7280', marginBottom: '4px'}}>Estado</p>
-                                    {getStatusBadge(delivery.status)}
-                                  </div>
+                                  {delivery.reviewedAt && (
+                                    <div>
+                                      <span style={{color: '#6b7280'}}>Revisado:</span>
+                                      <p style={{color: '#1f2937', margin: '2px 0 0 0'}}>
+                                        {formatDate(delivery.reviewedAt)}
+                                      </p>
+                                    </div>
+                                  )}
                                 </div>
 
                                 {delivery.description && (
-                                  <div style={{marginBottom: '16px'}}>
-                                    <p style={{fontSize: '12px', color: '#6b7280', marginBottom: '4px'}}>Descripcion</p>
-                                    <p style={{
-                                      fontSize: '14px',
-                                      background: '#f9fafb',
-                                      padding: '12px',
-                                      borderRadius: '8px',
-                                      margin: 0,
-                                      color: '#1f2937'
-                                    }}>
+                                  <div style={{
+                                    marginTop: '12px',
+                                    paddingTop: '12px',
+                                    borderTop: '1px solid #e5e7eb'
+                                  }}>
+                                    <span style={{fontSize: '12px', color: '#6b7280', fontWeight: '600'}}>
+                                      Descripción:
+                                    </span>
+                                    <p style={{fontSize: '14px', color: '#374151', margin: '4px 0 0 0'}}>
                                       {delivery.description}
                                     </p>
                                   </div>
                                 )}
 
                                 {delivery.advisorComments && (
-                                  <div style={{marginBottom: '16px'}}>
-                                    <p style={{fontSize: '12px', color: '#6b7280', marginBottom: '4px'}}>Comentarios del Asesor</p>
+                                  <div style={{
+                                    marginTop: '12px',
+                                    paddingTop: '12px',
+                                    borderTop: '1px solid #e5e7eb'
+                                  }}>
+                                    <span style={{fontSize: '12px', color: '#6b7280', fontWeight: '600'}}>
+                                      Comentarios del asesor:
+                                    </span>
                                     <p style={{
                                       fontSize: '14px',
+                                      color: '#374151',
+                                      margin: '8px 0 0 0',
                                       background: '#fef3c7',
                                       padding: '12px',
                                       borderRadius: '8px',
-                                      border: '1px solid #fde68a',
-                                      margin: 0,
-                                      color: '#92400e'
+                                      borderLeft: '4px solid #fbbf24'
                                     }}>
                                       {delivery.advisorComments}
                                     </p>
                                   </div>
                                 )}
-
-                                {delivery.fileUrl && (
-                                  <a
-                                    href={delivery.fileUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    style={{
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      gap: '8px',
-                                      background: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-                                      color: 'white',
-                                      padding: '10px 16px',
-                                      borderRadius: '8px',
-                                      fontSize: '14px',
-                                      fontWeight: '600',
-                                      textDecoration: 'none',
-                                      boxShadow: '0 4px 12px rgba(79, 172, 254, 0.3)',
-                                      transition: 'transform 0.2s'
-                                    }}
-                                    onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
-                                    onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
-                                  >
-                                    <svg style={{width: '18px', height: '18px'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                    </svg>
-                                    Ver PDF
-                                  </a>
-                                )}
                               </div>
-                            )}
+
+                                <a
+                                href={delivery.fileUrl}                                
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                  marginLeft: '16px',
+                                  flexShrink: 0,
+                                  padding: '10px 16px',
+                                  background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
+                                  color: 'white',
+                                  border: 'none',
+                                  borderRadius: '8px',
+                                  fontSize: '14px',
+                                  fontWeight: '600',
+                                  textDecoration: 'none',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: '6px',
+                                  boxShadow: '0 4px 15px rgba(59, 130, 246, 0.3)',
+                                  transition: 'transform 0.2s'
+                                }}
+                                onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
+                                onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
+                              >
+                                <svg style={{width: '16px', height: '16px'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                </svg>
+                                Ver PDF
+                              </a>
+                            </div>
                           </div>
                         ))}
                       </div>
+                    </div>
+                  )}
+
+                  {/* Mensaje cuando no hay entregas */}
+                  {!hasDeliveries && uploadingMilestone !== milestoneName && (
+                    <div style={{
+                      padding: '20px',
+                      background: '#f9fafb',
+                      borderTop: '1px solid #e5e7eb',
+                      textAlign: 'center',
+                      fontSize: '14px',
+                      color: '#6b7280'
+                    }}>
+                      No hay entregas para este hito
                     </div>
                   )}
                 </div>
@@ -584,162 +745,43 @@ export const StudentDashboard = () => {
           </div>
         </div>
 
+        {/* Información adicional */}
         <div style={{
-          background: 'white',
-          borderRadius: '16px',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-          padding: '28px'
+          marginTop: '32px',
+          background: '#eff6ff',
+          border: '2px solid #bfdbfe',
+          borderRadius: '12px',
+          padding: '20px'
         }}>
-          <h2 style={{fontSize: '22px', fontWeight: 'bold', marginBottom: '24px', color: '#1f2937'}}>
-            Mis Entregas ({deliveries.length})
-          </h2>
-
-          {deliveries.length === 0 ? (
-            <div style={{textAlign: 'center', padding: '48px 0'}}>
-              <div style={{fontSize: '64px', marginBottom: '16px'}}>📭</div>
-              <p style={{fontSize: '16px', color: '#6b7280'}}>Aun no has realizado ninguna entrega</p>
+          <div style={{display: 'flex', alignItems: 'start', gap: '16px'}}>
+            <div style={{
+              width: '40px',
+              height: '40px',
+              background: '#3b82f6',
+              borderRadius: '8px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0
+            }}>
+              <span style={{fontSize: '20px'}}>ℹ️</span>
             </div>
-          ) : (
-            <div style={{display: 'grid', gap: '12px'}}>
-              {deliveries.map((delivery) => (
-                <div
-                  key={delivery.id}
-                  style={{
-                    border: '1px solid #e5e7eb',
-                    borderRadius: '12px',
-                    padding: '16px',
-                    transition: 'all 0.2s'
-                  }}
-                  onMouseOver={(e) => {
-                    e.currentTarget.style.borderColor = '#60a5fa';
-                    e.currentTarget.style.boxShadow = '0 4px 12px rgba(96, 165, 250, 0.15)';
-                  }}
-                  onMouseOut={(e) => {
-                    e.currentTarget.style.borderColor = '#e5e7eb';
-                    e.currentTarget.style.boxShadow = 'none';
-                  }}
-                >
-                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '12px'}}>
-                    <div>
-                      <h3 style={{fontSize: '18px', fontWeight: 'bold', color: '#1f2937', margin: '0 0 4px 0'}}>
-                        {delivery.milestone}
-                      </h3>
-                      <p style={{fontSize: '14px', color: '#6b7280', margin: 0}}>
-                        Version {delivery.version}
-                      </p>
-                    </div>
-                    {getStatusBadge(delivery.status)}
-                  </div>
-
-                  <div style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(3, 1fr)',
-                    gap: '16px',
-                    fontSize: '14px',
-                    marginBottom: '12px'
-                  }}>
-                    <div>
-                      <p style={{color: '#6b7280', margin: '0 0 4px 0'}}>Archivo</p>
-                      <p style={{fontWeight: '500', color: '#1f2937', margin: 0}}>{delivery.fileName}</p>
-                    </div>
-                    <div>
-                      <p style={{color: '#6b7280', margin: '0 0 4px 0'}}>Tamaño</p>
-                      <p style={{fontWeight: '500', color: '#1f2937', margin: 0}}>{formatFileSize(delivery.fileSize)}</p>
-                    </div>
-                    <div>
-                      <p style={{color: '#6b7280', margin: '0 0 4px 0'}}>Fecha</p>
-                      <p style={{fontWeight: '500', color: '#1f2937', margin: 0}}>{formatDate(delivery.uploadedAt)}</p>
-                    </div>
-                  </div>
-
-                  {delivery.advisorComments && (
-                    <div style={{
-                      background: '#fef3c7',
-                      border: '1px solid #fde68a',
-                      borderRadius: '8px',
-                      padding: '12px',
-                      marginBottom: '12px'
-                    }}>
-                      <p style={{fontSize: '12px', fontWeight: '600', color: '#92400e', margin: '0 0 4px 0'}}>
-                        Comentarios del Asesor
-                      </p>
-                      <p style={{fontSize: '14px', color: '#92400e', margin: 0}}>
-                        {delivery.advisorComments}
-                      </p>
-                    </div>
-                  )}
-
-                  {delivery.fileUrl && (
-                    <a
-                      href={delivery.fileUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        background: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-                        color: 'white',
-                        padding: '10px 16px',
-                        borderRadius: '8px',
-                        fontSize: '14px',
-                        fontWeight: '600',
-                        textDecoration: 'none',
-                        boxShadow: '0 4px 12px rgba(79, 172, 254, 0.3)',
-                        transition: 'transform 0.2s'
-                      }}
-                      onMouseOver={(e) => e.target.style.transform = 'translateY(-2px)'}
-                      onMouseOut={(e) => e.target.style.transform = 'translateY(0)'}
-                    >
-                      <svg style={{width: '18px', height: '18px'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      </svg>
-                      Ver PDF
-                    </a>
-                  )}
-                </div>
-              ))}
+            <div style={{flex: 1}}>
+              <h3 style={{fontSize: '14px', fontWeight: 'bold', color: '#1e3a8a', margin: '0 0 8px 0'}}>
+                Información importante
+              </h3>
+              <ul style={{fontSize: '14px', color: '#1e40af', margin: 0, padding: '0 0 0 20px'}}>
+                <li style={{marginBottom: '6px'}}>Solo puedes subir archivos PDF (máximo 10MB)</li>
+                <li style={{marginBottom: '6px'}}>No puedes subir nuevas versiones si hay una pendiente de revisión</li>
+                <li style={{marginBottom: '6px'}}>Si tu entrega es rechazada, podrás subir una nueva versión</li>
+                <li>Una vez aprobado un hito, se habilita el siguiente automáticamente</li>
+              </ul>
             </div>
-          )}
+          </div>
         </div>
       </main>
 
-      {showUploadForm && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(0, 0, 0, 0.5)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 1000,
-          padding: '20px'
-        }}>
-          <div style={{
-            background: 'white',
-            borderRadius: '20px',
-            maxWidth: '600px',
-            width: '100%',
-            maxHeight: '90vh',
-            overflow: 'auto',
-            boxShadow: '0 20px 60px rgba(0,0,0,0.3)'
-          }}>
-            <UploadDeliveryForm
-              projectId={project.id}
-              milestone={selectedMilestone}
-              onSuccess={handleUploadSuccess}
-              onCancel={() => {
-                setShowUploadForm(false);
-                setSelectedMilestone('');
-              }}
-            />
-          </div>
-        </div>
-      )}
-
+      {/* Animación de loading */}
       <style>{`
         @keyframes spin {
           to { transform: rotate(360deg); }

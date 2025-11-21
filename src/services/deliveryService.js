@@ -162,15 +162,53 @@ export const getDeliveriesByMilestone = async (projectId, milestone) => {
   }
 };
 
+// Aprobar entrega y marcar hito como completado automáticamente
 export const approveDelivery = async (deliveryId, comments = '') => {
   try {
     const deliveryRef = doc(db, 'deliveries', deliveryId);
     
+    // Obtener la entrega
+    const deliveryDoc = await getDoc(deliveryRef);
+    if (!deliveryDoc.exists()) {
+      throw new Error('Entrega no encontrada');
+    }
+    
+    const deliveryData = deliveryDoc.data();
+    
+    // Actualizar estado de la entrega
     await updateDoc(deliveryRef, {
       status: 'approved',
       advisorComments: comments,
       reviewedAt: Timestamp.now()
     });
+
+    // Marcar el hito como completado en el proyecto AUTOMÁTICAMENTE
+    try {
+      const projectRef = doc(db, 'projects', deliveryData.projectId);
+      const projectDoc = await getDoc(projectRef);
+      
+      if (projectDoc.exists()) {
+        const project = projectDoc.data();
+        
+        const updatedMilestones = project.milestones.map(milestone => {
+          if (milestone.name === deliveryData.milestone) {
+            return { 
+              ...milestone, 
+              completed: true,
+              completedAt: new Date()
+            };
+          }
+          return milestone;
+        });
+        
+        await updateDoc(projectRef, {
+          milestones: updatedMilestones
+        });
+      }
+    } catch (projectError) {
+      console.error('Error marcando hito como completado:', projectError);
+      // No lanzar error, la entrega ya fue aprobada
+    }
 
     const updatedDoc = await getDoc(deliveryRef);
     return {
@@ -255,5 +293,148 @@ export const getProjectDeliveries = async (projectId) => {
   } catch (error) {
     console.error('Error obteniendo entregas del proyecto:', error);
     throw error;
+  }
+};
+
+// Verificar si se puede subir una nueva versión para un hito específico
+export const canUploadToMilestone = async (projectId, milestone) => {
+  try {
+    // Obtener todas las entregas de este hito
+    const deliveries = await getDeliveriesByMilestone(projectId, milestone);
+    
+    // Si no hay entregas, se puede subir
+    if (deliveries.length === 0) {
+      return { canUpload: true, reason: 'no_deliveries' };
+    }
+    
+    // Obtener la última versión
+    const lastDelivery = deliveries[deliveries.length - 1];
+    
+    // Si la última está pendiente, NO se puede subir
+    if (lastDelivery.status === 'pending') {
+      return { 
+        canUpload: false, 
+        reason: 'pending_review',
+        message: 'Hay una versión pendiente de revisión'
+      };
+    }
+    
+    // Si la última fue rechazada, SÍ se puede subir nueva versión
+    if (lastDelivery.status === 'rejected') {
+      return { 
+        canUpload: true, 
+        reason: 'rejected',
+        message: 'Puede subir una nueva versión'
+      };
+    }
+    
+    // Si la última fue aprobada, NO se puede subir más
+    if (lastDelivery.status === 'approved') {
+      return { 
+        canUpload: false, 
+        reason: 'approved',
+        message: 'Este hito ya fue aprobado'
+      };
+    }
+    
+    return { canUpload: true, reason: 'unknown' };
+  } catch (error) {
+    console.error('Error verificando posibilidad de subida:', error);
+    return { canUpload: false, reason: 'error', message: error.message };
+  }
+};
+
+// Obtener el estado del hito actual del estudiante
+export const getCurrentMilestoneStatus = async (projectId, milestones) => {
+  try {
+    const allDeliveries = await getDeliveriesByProject(projectId);
+    
+    // Crear un mapa de estados por hito
+    const milestoneStatus = {};
+    
+    for (const milestone of milestones) {
+      const milestoneName = milestone.name || milestone;
+      const deliveries = allDeliveries.filter(d => d.milestone === milestoneName);
+      
+      if (deliveries.length === 0) {
+        milestoneStatus[milestoneName] = {
+          status: 'not_started',
+          canUpload: true,
+          deliveries: [],
+          message: ''
+        };
+      } else {
+        // Ordenar entregas por versión (la más reciente al final)
+        deliveries.sort((a, b) => (a.version || 0) - (b.version || 0));
+        
+        // Obtener la ÚLTIMA entrega (versión más reciente)
+        const lastDelivery = deliveries[deliveries.length - 1];
+        
+        // El estado del hito es el estado de la ÚLTIMA versión
+        const uploadPermission = await canUploadToMilestone(projectId, milestoneName);
+        
+        let message = '';
+        if (lastDelivery.status === 'pending') {
+          message = 'Hay una versión pendiente de revisión';
+        } else if (lastDelivery.status === 'rejected') {
+          message = 'La última versión fue rechazada. Puede subir una nueva versión';
+        } else if (lastDelivery.status === 'approved') {
+          message = 'Este hito ya fue aprobado';
+        }
+        
+        milestoneStatus[milestoneName] = {
+          status: lastDelivery.status, // ← ESTADO DE LA ÚLTIMA VERSIÓN
+          canUpload: uploadPermission.canUpload,
+          reason: uploadPermission.reason,
+          message: message,
+          deliveries: deliveries // Todas las entregas ordenadas
+        };
+      }
+    }
+    
+    return milestoneStatus;
+  } catch (error) {
+    console.error('Error obteniendo estado de hitos:', error);
+    throw error;
+  }
+};
+
+// Determinar qué hito puede recibir entregas (lógica secuencial)
+export const getNextAvailableMilestone = async (projectId, milestones) => {
+  try {
+    // Para cada hito en orden
+    for (let i = 0; i < milestones.length; i++) {
+      const milestoneName = milestones[i].name;
+      const deliveries = await getDeliveriesByMilestone(projectId, milestoneName);
+      
+      // Si no hay entregas, este es el hito disponible
+      if (deliveries.length === 0) {
+        return milestoneName;
+      }
+      
+      // Si hay entregas, revisar la última
+      const lastDelivery = deliveries[deliveries.length - 1];
+      
+      // Si está pendiente, no se puede avanzar
+      if (lastDelivery.status === 'pending') {
+        return null; // Ningún hito disponible
+      }
+      
+      // Si fue rechazada, este mismo hito sigue disponible
+      if (lastDelivery.status === 'rejected') {
+        return milestoneName;
+      }
+      
+      // Si fue aprobada, continuar al siguiente hito
+      if (lastDelivery.status === 'approved') {
+        continue;
+      }
+    }
+    
+    // Todos los hitos completados
+    return null;
+  } catch (error) {
+    console.error('Error determinando hito disponible:', error);
+    return null;
   }
 };
