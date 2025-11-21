@@ -5,11 +5,12 @@ import {
   getDocs, 
   setDoc,
   updateDoc,
+  deleteDoc,
   query,
   where,
   Timestamp
 } from 'firebase/firestore';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
+import { createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 import { db, auth } from '../config/firebase';
 
 /**
@@ -39,17 +40,19 @@ export const getUserById = async (uid) => {
 // Obtener todos los usuarios
 export const getAllUsers = async () => {
   try {
-    const usersSnapshot = await getDocs(collection(db, 'users'));
+    const usersRef = collection(db, 'users');
+    const snapshot = await getDocs(usersRef);
     
-    const users = usersSnapshot.docs.map(doc => ({
+    const users = snapshot.docs.map(doc => ({
+      id: doc.id,
       uid: doc.id,
       ...doc.data()
     }));
-
+    
     return users;
   } catch (error) {
     console.error('Error obteniendo usuarios:', error);
-    throw new Error('Error al obtener usuarios');
+    throw error;
   }
 };
 
@@ -243,54 +246,59 @@ export const getUserCountByRole = async () => {
 };
 
 // Registro de nuevo usuario (con soporte para aprobación de asesores)
-export const registerUser = async (email, password, userData) => {
+export const registerUser = async ({ email, password, name, role, approved = false }) => {
   try {
-    const { name, role } = userData;
-
-    // Validaciones
-    if (!email || !password || !name || !role) {
-      throw new Error('Todos los campos son obligatorios');
-    }
-
-    if (password.length < 6) {
-      throw new Error('La contraseña debe tener al menos 6 caracteres');
-    }
-
-    // 1. Crear usuario en Firebase Auth
+    console.log('Creando usuario con:', { email, name, role, approved });
+    
+    // Crear usuario en Firebase Auth
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-    const user = userCredential.user;
+    const newUser = userCredential.user;
 
-    // 2. Crear documento en Firestore
-    const userDocData = {
-      email: email,
-      name: name,
-      role: role,
-      status: role === 'advisor' ? 'pending' : 'active', // Asesores pendientes de aprobación
+    console.log('Usuario creado en Auth:', newUser.uid);
+
+    // Crear documento en Firestore
+    const userData = {
+      uid: newUser.uid,
+      email,
+      name,
+      role,
+      approved,
       createdAt: Timestamp.now(),
-      ...(role === 'advisor' && { assignedProjects: [] }),
-      ...(role === 'student' && { teamId: null })
+      teamId: null,
+      assignedProjects: role === 'advisor' ? [] : null
     };
 
-    await setDoc(doc(db, 'users', user.uid), userDocData);
+    console.log('Guardando en Firestore:', userData);
 
-    return {
-      uid: user.uid,
-      email: email,
-      ...userDocData
+    await setDoc(doc(db, 'users', newUser.uid), userData);
+
+    console.log('Usuario guardado en Firestore');
+
+    // Cerrar sesión del nuevo usuario
+    await signOut(auth);
+
+    console.log('Sesión cerrada');
+
+    return { 
+      uid: newUser.uid, 
+      email, 
+      name, 
+      role, 
+      approved 
     };
   } catch (error) {
-    console.error('Error en registro:', error);
+    console.error('Error completo en registerUser:', error);
     
-    switch (error.code) {
-      case 'auth/email-already-in-use':
-        throw new Error('El email ya está registrado');
-      case 'auth/invalid-email':
-        throw new Error('Email inválido');
-      case 'auth/weak-password':
-        throw new Error('La contraseña debe tener al menos 6 caracteres');
-      default:
-        throw new Error(error.message || 'Error al registrar usuario');
+    // Mensajes de error más claros
+    if (error.code === 'auth/email-already-in-use') {
+      throw new Error('El correo electrónico ya está registrado');
+    } else if (error.code === 'auth/invalid-email') {
+      throw new Error('El correo electrónico no es válido');
+    } else if (error.code === 'auth/weak-password') {
+      throw new Error('La contraseña es muy débil');
     }
+    
+    throw new Error(error.message || 'Error al registrar usuario');
   }
 };
 
@@ -355,5 +363,221 @@ export const getPendingUsers = async () => {
   } catch (error) {
     console.error('Error obteniendo usuarios pendientes:', error);
     return [];
+  }
+};
+
+// Activar/Desactivar usuario
+export const toggleUserStatus = async (userId, isActive) => {
+  try {
+    const userRef = doc(db, 'users', userId);
+    const userSnap = await getDoc(userRef);
+    
+    if (!userSnap.exists()) {
+      throw new Error('Usuario no existe');
+    }
+
+    const userData = userSnap.data();
+    
+    // Proteger último admin
+    if (!isActive && userData.role === 'admin') {
+      const admins = await getAllAdmins();
+      const activeAdmins = admins.filter(a => a.isActive !== false);
+      
+      if (activeAdmins.length <= 1) {
+        throw new Error('No se puede desactivar el último administrador activo del sistema');
+      }
+    }
+
+    await updateDoc(userRef, {
+      isActive: isActive
+    });
+
+    // Si se desactiva un estudiante, revisar sus proyectos
+    if (!isActive && userData.role === 'student' && userData.teamId) {
+      await updateProjectStatusAfterStudentChange(userData.teamId);
+    }
+
+    // Si se activa un estudiante, revisar sus proyectos
+    if (isActive && userData.role === 'student' && userData.teamId) {
+      await updateProjectStatusAfterStudentChange(userData.teamId);
+    }
+
+    // Si se desactiva un asesor, sus proyectos pasan a pendiente
+    if (!isActive && userData.role === 'advisor' && userData.assignedProjects) {
+      await handleAdvisorDeactivation(userData.assignedProjects);
+    }
+
+    // Si se activa un asesor, revisar sus proyectos
+    if (isActive && userData.role === 'advisor' && userData.assignedProjects) {
+      await handleAdvisorActivation(userData.assignedProjects);
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error cambiando estado de usuario:', error);
+    throw error;
+  }
+};
+
+// Actualizar estado de proyecto después de cambio de estudiante
+const updateProjectStatusAfterStudentChange = async (projectId) => {
+  try {
+    const projectRef = doc(db, 'projects', projectId);
+    const projectSnap = await getDoc(projectRef);
+    
+    if (!projectSnap.exists()) return;
+
+    const projectData = projectSnap.data();
+    
+    // Verificar cuántos estudiantes activos hay
+    let activeStudentsCount = 0;
+    if (projectData.teamMembers && projectData.teamMembers.length > 0) {
+      for (const studentId of projectData.teamMembers) {
+        const studentRef = doc(db, 'users', studentId);
+        const studentSnap = await getDoc(studentRef);
+        
+        if (studentSnap.exists() && studentSnap.data().isActive !== false) {
+          activeStudentsCount++;
+        }
+      }
+    }
+
+    // Determinar nuevo estado según reglas
+    let newStatus;
+    let reason = '';
+
+    if (projectData.advisorId && activeStudentsCount > 0) {
+      // Tiene asesor y al menos 1 estudiante activo -> En Progreso
+      newStatus = 'in_progress';
+    } else if (!projectData.advisorId || activeStudentsCount === 0) {
+      // Sin asesor O sin estudiantes activos
+      if (projectData.advisorId && activeStudentsCount === 0) {
+        // Tiene asesor pero todos los estudiantes inactivos -> Suspendido
+        newStatus = 'suspended';
+        reason = 'Todos los estudiantes están inactivos';
+      } else {
+        // Sin asesor -> Pendiente
+        newStatus = 'pending';
+        reason = projectData.advisorId ? 'Sin estudiantes activos' : 'Sin asesor asignado';
+      }
+    }
+
+    await updateDoc(projectRef, {
+      status: newStatus,
+      ...(reason && { suspendedReason: reason, pendingReason: reason })
+    });
+
+  } catch (error) {
+    console.error('Error actualizando estado de proyecto:', error);
+  }
+};
+
+// Manejar desactivación de asesor
+const handleAdvisorDeactivation = async (projectIds) => {
+  try {
+    for (const projectId of projectIds) {
+      const projectRef = doc(db, 'projects', projectId);
+      const projectSnap = await getDoc(projectRef);
+      
+      if (projectSnap.exists()) {
+        await updateDoc(projectRef, {
+          status: 'pending',
+          advisorId: null,
+          pendingReason: 'Asesor desactivado - requiere reasignación'
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Error manejando desactivación de asesor:', error);
+  }
+};
+
+// Manejar activación de asesor
+const handleAdvisorActivation = async (projectIds) => {
+  try {
+    for (const projectId of projectIds) {
+      await updateProjectStatusAfterStudentChange(projectId);
+    }
+  } catch (error) {
+    console.error('Error manejando activación de asesor:', error);
+  }
+};
+
+// Crear usuario POR EL ADMIN (SIN inicio de sesión)
+export const createUserByAdmin = async ({ email, password, name, role, approved = true }) => {
+  let tempUser = null;
+  
+  try {
+    console.log('🔹 Admin creando usuario:', { email, name, role });
+    
+    // Verificar que hay un admin autenticado
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      throw new Error('No hay sesión de administrador activa');
+    }
+
+    console.log('🔹 Admin actual:', currentUser.uid);
+
+    // Crear usuario en Firebase Auth
+    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+    tempUser = userCredential.user;
+
+    console.log('✅ Usuario creado en Auth:', tempUser.uid);
+
+    // Crear documento en Firestore
+    const userData = {
+      uid: tempUser.uid,
+      email,
+      name,
+      role,
+      approved,
+      isActive: true,
+      createdAt: Timestamp.now(),
+      teamId: null,
+      assignedProjects: role === 'advisor' ? [] : null
+    };
+
+    await setDoc(doc(db, 'users', tempUser.uid), userData);
+
+    console.log('✅ Documento creado en Firestore');
+
+    // CRÍTICO: Cerrar sesión del nuevo usuario
+    console.log('🔹 Cerrando sesión del nuevo usuario...');
+    await signOut(auth);
+    
+    console.log('✅ Sesión cerrada, restaurando admin...');
+
+    // Pequeña pausa para que Firebase restaure la sesión del admin
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    return { 
+      uid: tempUser.uid, 
+      email, 
+      name, 
+      role, 
+      approved 
+    };
+  } catch (error) {
+    console.error('❌ Error en createUserByAdmin:', error);
+    
+    // Si el usuario fue creado en Auth pero falló Firestore, eliminarlo
+    if (tempUser) {
+      try {
+        await tempUser.delete();
+        console.log('⚠️ Usuario eliminado de Auth por error');
+      } catch (deleteError) {
+        console.error('❌ No se pudo eliminar usuario:', deleteError);
+      }
+    }
+    
+    if (error.code === 'auth/email-already-in-use') {
+      throw new Error('El correo electrónico ya está registrado');
+    } else if (error.code === 'auth/invalid-email') {
+      throw new Error('El correo electrónico no es válido');
+    } else if (error.code === 'auth/weak-password') {
+      throw new Error('La contraseña debe tener al menos 6 caracteres');
+    }
+    
+    throw new Error(error.message || 'Error al crear usuario');
   }
 };

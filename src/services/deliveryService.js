@@ -229,3 +229,31 @@ export const getPendingDeliveries = async (projectId) => {
     throw new Error('Error al obtener entregas pendientes');
   }
 };
+
+// Obtener todas las entregas de un proyecto específico
+export const getProjectDeliveries = async (projectId) => {
+  try {
+    const deliveriesRef = collection(db, 'deliveries');
+    const q = query(deliveriesRef, where('projectId', '==', projectId));
+    const snapshot = await getDocs(q);
+    
+    const deliveries = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+    
+    // Ordenar por fecha de subida descendente (más reciente primero)
+    deliveries.sort((a, b) => {
+      const dateA = a.submittedAt || a.uploadedAt;
+      const dateB = b.submittedAt || b.uploadedAt;
+      if (!dateA) return 1;
+      if (!dateB) return -1;
+      return dateB.toDate() - dateA.toDate();
+    });
+    
+    return deliveries;
+  } catch (error) {
+    console.error('Error obteniendo entregas del proyecto:', error);
+    throw error;
+  }
+};

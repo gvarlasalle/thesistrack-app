@@ -1,9 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { createProject } from '../../services/projectService';
 import { getAllUsers } from '../../services/userService';
-import { useEffect } from 'react';
 
-export const CreateProjectForm = ({ onSuccess, onCancel }) => {
+export const CreateProjectForm = ({ onSuccess, onCancel, onRefresh  }) => {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [students, setStudents] = useState([]);
@@ -12,6 +11,8 @@ export const CreateProjectForm = ({ onSuccess, onCancel }) => {
   const [advisors, setAdvisors] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [totalStudents, setTotalStudents] = useState(0);
+  const [totalAdvisors, setTotalAdvisors] = useState(0);
 
   useEffect(() => {
     loadUsers();
@@ -20,19 +21,59 @@ export const CreateProjectForm = ({ onSuccess, onCancel }) => {
   const loadUsers = async () => {
     try {
       const users = await getAllUsers();
-      setStudents(users.filter(u => u.role === 'student'));
-      setAdvisors(users.filter(u => u.role === 'advisor'));
+      // Normalizar IDs: Firebase devuelve 'uid' pero usamos 'id'
+      const normalizedUsers = users.map(u => ({
+        ...u,
+        id: u.uid || u.id
+      }));
+      
+      // Contar total de estudiantes
+      const allStudents = normalizedUsers.filter(u => u.role === 'student');
+      setTotalStudents(allStudents.length);
+      
+      // Filtrar solo estudiantes ACTIVOS que NO tienen teamId
+      const availableStudents = allStudents.filter(u => 
+        !u.teamId && u.isActive !== false  // ← Solo activos
+      );
+      
+      // Contar total de asesores
+      const allAdvisors = normalizedUsers.filter(u => u.role === 'advisor');
+      setTotalAdvisors(allAdvisors.length);
+      
+      // Filtrar asesores ACTIVOS con menos de 12 proyectos
+      const availableAdvisors = allAdvisors.filter(adv => {
+        const projectCount = adv.assignedProjects ? adv.assignedProjects.length : 0;
+        return projectCount < 12 && adv.isActive !== false;  // ← Solo activos
+      });
+      
+      setStudents(availableStudents);
+      setAdvisors(availableAdvisors);
     } catch (err) {
+      console.error('Error cargando usuarios:', err);
       setError('Error cargando usuarios');
     }
   };
 
   const handleStudentToggle = (studentId) => {
+    if (!studentId) {
+      console.error('ID de estudiante inválido:', studentId);
+      return;
+    }
+    
     setSelectedStudents(prev =>
       prev.includes(studentId)
         ? prev.filter(id => id !== studentId)
         : [...prev, studentId]
     );
+  };
+
+  const handleSelectAll = () => {
+    const validIds = students.map(s => s.id).filter(id => id);
+    setSelectedStudents(validIds);
+  };
+
+  const handleDeselectAll = () => {
+    setSelectedStudents([]);
   };
 
   const handleSubmit = async (e) => {
@@ -57,14 +98,28 @@ export const CreateProjectForm = ({ onSuccess, onCancel }) => {
     try {
       await createProject({
         title: title.trim(),
-        description: description.trim(),
+        description: description.trim() || '',
         teamMembers: selectedStudents,
         advisorId: advisor,
         status: 'in_progress',
-        currentMilestone: 'Capitulo 1'
+        currentMilestone: 'Capitulo 1',
+        milestones: [
+          { name: 'Capitulo 1', completed: false },
+          { name: 'Capitulo 2', completed: false },
+          { name: 'Capitulo 3', completed: false }
+        ]
       });
+      
+      // Limpiar formulario
+      setTitle('');
+      setDescription('');
+      setSelectedStudents([]);
+      setAdvisor('');
+      
       onSuccess();
+      if (onRefresh) onRefresh();
     } catch (err) {
+      console.error('Error creando proyecto:', err);
       setError(err.message);
     } finally {
       setLoading(false);
@@ -72,7 +127,13 @@ export const CreateProjectForm = ({ onSuccess, onCancel }) => {
   };
 
   return (
-    <div style={{padding: '32px'}}>
+    <div style={{
+      background: 'white',
+      borderRadius: '16px',
+      boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+      padding: '32px',
+      marginBottom: '32px'
+    }}>
       {/* Header */}
       <div style={{marginBottom: '32px'}}>
         <h2 style={{
@@ -84,7 +145,7 @@ export const CreateProjectForm = ({ onSuccess, onCancel }) => {
           Crear Nuevo Proyecto
         </h2>
         <p style={{fontSize: '14px', color: '#6b7280', margin: 0}}>
-          Completa la informacion del proyecto y asigna estudiantes y asesor
+          Completa la información del proyecto y asigna estudiantes y asesor
         </p>
       </div>
 
@@ -104,7 +165,7 @@ export const CreateProjectForm = ({ onSuccess, onCancel }) => {
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="Ej: Sistema de Gestion de Bibliotecas"
+            placeholder="Ej: Sistema de Gestión de Bibliotecas"
             disabled={loading}
             style={{
               width: '100%',
@@ -129,12 +190,12 @@ export const CreateProjectForm = ({ onSuccess, onCancel }) => {
             color: '#374151',
             marginBottom: '8px'
           }}>
-            Descripcion
+            Descripción
           </label>
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="Descripcion del proyecto..."
+            placeholder="Descripción del proyecto..."
             rows={4}
             disabled={loading}
             style={{
@@ -155,15 +216,59 @@ export const CreateProjectForm = ({ onSuccess, onCancel }) => {
 
         {/* Estudiantes */}
         <div style={{marginBottom: '24px'}}>
-          <label style={{
-            display: 'block',
-            fontSize: '14px',
-            fontWeight: '600',
-            color: '#374151',
-            marginBottom: '8px'
-          }}>
-            Seleccionar Estudiantes <span style={{color: '#ef4444'}}>*</span>
-          </label>
+          <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px'}}>
+            <label style={{
+              fontSize: '14px',
+              fontWeight: '600',
+              color: '#374151',
+              margin: 0
+            }}>
+              Seleccionar Estudiantes <span style={{color: '#ef4444'}}>*</span>
+            </label>
+            <div style={{display: 'flex', gap: '8px'}}>
+              <button
+                type="button"
+                onClick={handleSelectAll}
+                disabled={loading || students.length === 0}
+                style={{
+                  padding: '6px 12px',
+                  background: '#f3f4f6',
+                  color: '#6b7280',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  fontWeight: '500',
+                  cursor: loading || students.length === 0 ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.2s'
+                }}
+                onMouseOver={(e) => !loading && students.length > 0 && (e.target.style.background = '#e5e7eb')}
+                onMouseOut={(e) => !loading && (e.target.style.background = '#f3f4f6')}
+              >
+                Seleccionar Todos
+              </button>
+              <button
+                type="button"
+                onClick={handleDeselectAll}
+                disabled={loading || selectedStudents.length === 0}
+                style={{
+                  padding: '6px 12px',
+                  background: '#f3f4f6',
+                  color: '#6b7280',
+                  border: '1px solid #d1d5db',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                  fontWeight: '500',
+                  cursor: loading || selectedStudents.length === 0 ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.2s'
+                }}
+                onMouseOver={(e) => !loading && selectedStudents.length > 0 && (e.target.style.background = '#e5e7eb')}
+                onMouseOut={(e) => !loading && (e.target.style.background = '#f3f4f6')}
+              >
+                Deseleccionar Todos
+              </button>
+            </div>
+          </div>
+          
           <div style={{
             border: '2px solid #e5e7eb',
             borderRadius: '10px',
@@ -173,61 +278,80 @@ export const CreateProjectForm = ({ onSuccess, onCancel }) => {
             background: '#f9fafb'
           }}>
             {students.length === 0 ? (
-              <p style={{color: '#6b7280', fontSize: '14px', textAlign: 'center', margin: '12px 0'}}>
-                No hay estudiantes disponibles
-              </p>
+              <div style={{textAlign: 'center', padding: '20px'}}>
+                <svg style={{width: '60px', height: '60px', margin: '0 auto 12px', color: '#d1d5db'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+                <p style={{color: '#6b7280', fontSize: '14px', fontWeight: '500', margin: '0 0 4px 0'}}>
+                  {totalStudents === 0 ? 'No hay estudiantes registrados' : 'No hay estudiantes disponibles'}
+                </p>
+                <p style={{color: '#9ca3af', fontSize: '12px', margin: 0}}>
+                  {totalStudents === 0 
+                    ? 'Registra estudiantes desde la gestión de usuarios para poder asignarlos a proyectos'
+                    : 'Todos los estudiantes activos ya están asignados a un proyecto de tesis'
+                  }
+                </p>
+              </div>
             ) : (
-              students.map((student) => (
-                <label
-                  key={student.id}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    padding: '10px 12px',
-                    background: 'white',
-                    borderRadius: '8px',
-                    marginBottom: '8px',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s',
-                    border: '1px solid #e5e7eb'
-                  }}
-                  onMouseOver={(e) => {
-                    e.currentTarget.style.background = '#f3f4f6';
-                    e.currentTarget.style.borderColor = '#8b5cf6';
-                  }}
-                  onMouseOut={(e) => {
-                    e.currentTarget.style.background = 'white';
-                    e.currentTarget.style.borderColor = '#e5e7eb';
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedStudents.includes(student.id)}
-                    onChange={() => handleStudentToggle(student.id)}
-                    disabled={loading}
+              students.map((student) => {
+                if (!student.id) {
+                  console.error('Estudiante sin ID:', student);
+                  return null;
+                }
+                
+                return (
+                  <label
+                    key={student.id}
                     style={{
-                      width: '18px',
-                      height: '18px',
-                      marginRight: '12px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      padding: '10px 12px',
+                      background: 'white',
+                      borderRadius: '8px',
+                      marginBottom: '8px',
                       cursor: 'pointer',
-                      accentColor: '#8b5cf6'
+                      transition: 'all 0.2s',
+                      border: '1px solid #e5e7eb'
                     }}
-                  />
-                  <div style={{flex: 1}}>
-                    <p style={{fontSize: '14px', fontWeight: '500', color: '#1f2937', margin: 0}}>
-                      {student.name}
-                    </p>
-                    <p style={{fontSize: '12px', color: '#6b7280', margin: '2px 0 0 0'}}>
-                      {student.email}
-                    </p>
-                  </div>
-                </label>
-              ))
+                    onMouseOver={(e) => {
+                      e.currentTarget.style.background = '#f3f4f6';
+                      e.currentTarget.style.borderColor = '#8b5cf6';
+                    }}
+                    onMouseOut={(e) => {
+                      e.currentTarget.style.background = 'white';
+                      e.currentTarget.style.borderColor = '#e5e7eb';
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedStudents.includes(student.id)}
+                      onChange={() => handleStudentToggle(student.id)}
+                      disabled={loading}
+                      style={{
+                        width: '18px',
+                        height: '18px',
+                        marginRight: '12px',
+                        cursor: 'pointer',
+                        accentColor: '#8b5cf6'
+                      }}
+                    />
+                    <div style={{flex: 1}}>
+                      <p style={{fontSize: '14px', fontWeight: '500', color: '#1f2937', margin: 0}}>
+                        {student.name}
+                      </p>
+                      <p style={{fontSize: '12px', color: '#6b7280', margin: '2px 0 0 0'}}>
+                        {student.email}
+                      </p>
+                    </div>
+                  </label>
+                );
+              })
             )}
           </div>
+          
           {selectedStudents.length > 0 && (
-            <p style={{fontSize: '12px', color: '#8b5cf6', marginTop: '8px'}}>
-              {selectedStudents.length} estudiante(s) seleccionado(s)
+            <p style={{fontSize: '12px', color: selectedStudents.length >= 3 ? '#ef4444' : '#8b5cf6', marginTop: '8px'}}>
+              {selectedStudents.length}/3 estudiante(s) seleccionado(s)
             </p>
           )}
         </div>
@@ -243,31 +367,58 @@ export const CreateProjectForm = ({ onSuccess, onCancel }) => {
           }}>
             Seleccionar Asesor <span style={{color: '#ef4444'}}>*</span>
           </label>
-          <select
-            value={advisor}
-            onChange={(e) => setAdvisor(e.target.value)}
-            disabled={loading}
-            style={{
-              width: '100%',
-              padding: '12px 16px',
+          
+          {advisors.length === 0 ? (
+            <div style={{
               border: '2px solid #e5e7eb',
               borderRadius: '10px',
-              fontSize: '14px',
-              background: 'white',
-              cursor: 'pointer',
-              transition: 'border 0.2s',
-              boxSizing: 'border-box'
-            }}
-            onFocus={(e) => e.target.style.borderColor = '#8b5cf6'}
-            onBlur={(e) => e.target.style.borderColor = '#e5e7eb'}
-          >
-            <option value="">-- Seleccionar --</option>
-            {advisors.map((adv) => (
-              <option key={adv.id} value={adv.id}>
-                {adv.name} ({adv.email})
-              </option>
-            ))}
-          </select>
+              padding: '20px',
+              background: '#f9fafb',
+              textAlign: 'center'
+            }}>
+              <svg style={{width: '50px', height: '50px', margin: '0 auto 12px', color: '#d1d5db'}} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+              </svg>
+              <p style={{color: '#6b7280', fontSize: '14px', fontWeight: '500', margin: '0 0 4px 0'}}>
+                {totalAdvisors === 0 ? 'No hay asesores registrados' : 'No hay asesores disponibles'}
+              </p>
+              <p style={{color: '#9ca3af', fontSize: '12px', margin: 0}}>
+                {totalAdvisors === 0 
+                  ? 'Registra asesores desde la gestión de usuarios para poder asignarlos a proyectos'
+                  : 'Todos los asesores están trabajando en 12 o más proyectos de tesis'
+                }
+              </p>
+            </div>
+          ) : (
+            <select
+              value={advisor}
+              onChange={(e) => setAdvisor(e.target.value)}
+              disabled={loading}
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                border: '2px solid #e5e7eb',
+                borderRadius: '10px',
+                fontSize: '14px',
+                background: 'white',
+                cursor: 'pointer',
+                transition: 'border 0.2s',
+                boxSizing: 'border-box'
+              }}
+              onFocus={(e) => e.target.style.borderColor = '#8b5cf6'}
+              onBlur={(e) => e.target.style.borderColor = '#e5e7eb'}
+            >
+              <option value="">-- Seleccionar --</option>
+              {advisors.map((adv) => {
+                const projectCount = adv.assignedProjects ? adv.assignedProjects.length : 0;
+                return (
+                  <option key={adv.id} value={adv.id}>
+                    {adv.name} ({adv.email}) - {projectCount}/12 proyectos
+                  </option>
+                );
+              })}
+            </select>
+          )}
         </div>
 
         {/* Error */}

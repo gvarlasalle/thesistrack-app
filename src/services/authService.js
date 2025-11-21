@@ -4,7 +4,7 @@ import {
   onAuthStateChanged,
   createUserWithEmailAndPassword 
 } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, Timestamp } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
 
 /**
@@ -27,15 +27,16 @@ export const login = async (email, password) => {
 
     const userData = userDoc.data();
 
-    // Verificar estado del usuario
-    if (userData.status === 'pending') {
+    // Verificar si el usuario está aprobado
+    if (userData.approved === false) {
       await signOut(auth);
       throw new Error('Tu cuenta está pendiente de aprobación por un administrador');
     }
 
-    if (userData.status === 'rejected') {
+    // Verificar si el usuario está activo
+    if (userData.isActive === false) {
       await signOut(auth);
-      throw new Error('Tu cuenta ha sido rechazada. Contacta al administrador');
+      throw new Error('Tu cuenta ha sido desactivada. Contacta al administrador');
     }
 
     console.log('Login exitoso, rol:', userData.role);
@@ -94,9 +95,11 @@ export const onAuthStateChange = (callback) => {
   });
 };
 
-// Registro de nuevo usuario (con soporte para aprobación de asesores)
+// Registro de nuevo usuario público (CON inicio de sesión automático)
 export const registerUser = async (email, password, userData) => {
   try {
+    console.log('🔹 Registro público - Iniciando...', { email, role: userData.role });
+    
     const { name, role } = userData;
 
     // Validaciones
@@ -108,32 +111,55 @@ export const registerUser = async (email, password, userData) => {
       throw new Error('La contraseña debe tener al menos 6 caracteres');
     }
 
+    console.log('🔹 Creando usuario en Firebase Auth...');
+    
     // 1. Crear usuario en Firebase Auth
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
     const user = userCredential.user;
 
+    console.log('✅ Usuario creado en Auth:', user.uid);
+
     // 2. Crear documento en Firestore
     const userDocData = {
+      uid: user.uid,
       email: email,
       name: name,
       role: role,
-      status: role === 'advisor' ? 'pending' : 'active', // Asesores pendientes de aprobación
-      createdAt: Timestamp.now(),
-      ...(role === 'advisor' && { assignedProjects: [] }),
-      ...(role === 'student' && { teamId: null })
+      approved: false,  // Requiere aprobación del admin
+      isActive: true,
+      createdAt: Timestamp.now()
     };
+
+    // Agregar campos específicos según el rol
+    if (role === 'student') {
+      userDocData.teamId = null;
+    }
+
+    if (role === 'advisor') {
+      userDocData.assignedProjects = [];
+    }
+
+    console.log('🔹 Guardando en Firestore...');
+
+    console.log('🔹 Guardando en Firestore...');
 
     await setDoc(doc(db, 'users', user.uid), userDocData);
 
+    console.log('✅ Usuario registrado exitosamente');
+
+    // IMPORTANTE: NO cerrar sesión, el usuario queda autenticado
     return {
       uid: user.uid,
       email: email,
       ...userDocData
     };
   } catch (error) {
-    console.error('Error en registro:', error);
+    console.error('❌ Error en registro:', error);
+    console.error('❌ Código:', error.code);
     
     switch (error.code) {
+      case 'auth/admin-restricted-operation':
+        throw new Error('El registro está deshabilitado en Firebase Console. Verifica que Email/Password esté habilitado.');
       case 'auth/email-already-in-use':
         throw new Error('El email ya está registrado');
       case 'auth/invalid-email':

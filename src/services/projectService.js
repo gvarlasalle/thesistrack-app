@@ -43,7 +43,7 @@ export const createProject = async (projectData) => {
       description: description?.trim() || '',
       teamMembers: teamMembers, // Array de UIDs de estudiantes
       advisorId: advisorId,
-      status: 'pending', // pending, in_progress, completed, rejected
+      status: 'in_progress', // pending, in_progress, completed, rejected
       currentMilestone: milestones && milestones.length > 0 ? milestones[0].name : 'Inicio',
       milestones: milestones || [
         { name: 'Capítulo 1', completed: false, dueDate: null },
@@ -315,28 +315,58 @@ export const getProjectsWithDetails = async () => {
 // Eliminar proyecto
 export const deleteProject = async (projectId) => {
   try {
-    const project = await getProjectById(projectId);
-
-    // Remover proyecto de asesor
-    if (project.advisorId) {
-      const advisorRef = doc(db, 'users', project.advisorId);
-      await updateDoc(advisorRef, {
-        assignedProjects: arrayRemove(projectId)
-      });
+    const projectRef = doc(db, 'projects', projectId);
+    const projectSnap = await getDoc(projectRef);
+    
+    if (!projectSnap.exists()) {
+      throw new Error('El proyecto no existe');
     }
 
-    // Remover teamId de estudiantes
-    for (const studentId of project.teamMembers) {
-      const studentRef = doc(db, 'users', studentId);
-      await updateDoc(studentRef, {
-        teamId: null
-      });
+    const projectData = projectSnap.data();
+    
+    // Remover teamId de estudiantes (verificar que existan)
+    if (projectData.teamMembers && projectData.teamMembers.length > 0) {
+      for (const studentId of projectData.teamMembers) {
+        try {
+          const studentRef = doc(db, 'users', studentId);
+          const studentSnap = await getDoc(studentRef);
+          
+          if (studentSnap.exists()) {
+            await updateDoc(studentRef, {
+              teamId: null
+            });
+          } else {
+            console.warn(`Estudiante ${studentId} no existe, saltando...`);
+          }
+        } catch (err) {
+          console.warn(`Error actualizando estudiante ${studentId}:`, err);
+          // Continuar con otros estudiantes
+        }
+      }
     }
 
-    // Eliminar proyecto
-    await deleteDoc(doc(db, 'projects', projectId));
+    // Remover proyecto de assignedProjects del asesor (verificar que exista)
+    if (projectData.advisorId) {
+      try {
+        const advisorRef = doc(db, 'users', projectData.advisorId);
+        const advisorSnap = await getDoc(advisorRef);
+        
+        if (advisorSnap.exists()) {
+          await updateDoc(advisorRef, {
+            assignedProjects: arrayRemove(projectId)
+          });
+        } else {
+          console.warn(`Asesor ${projectData.advisorId} no existe, saltando...`);
+        }
+      } catch (err) {
+        console.warn(`Error actualizando asesor ${projectData.advisorId}:`, err);
+      }
+    }
 
-    return { success: true };
+    // Eliminar el proyecto
+    await deleteDoc(projectRef);
+    
+    console.log('Proyecto eliminado exitosamente');
   } catch (error) {
     console.error('Error eliminando proyecto:', error);
     throw new Error('Error al eliminar proyecto');
